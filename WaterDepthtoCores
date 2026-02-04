@@ -1,0 +1,89 @@
+import pandas as pd
+import os
+
+# Define the correct file paths
+FILE_1 = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/Final/Depth_Combined_Output_3.csv"
+FILE_2 = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/DGS_Cores_Appendix_McKenna_Ramsey_2002.csv"
+
+# Define output paths
+OUTPUT_XLSX = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/DGS_Combined_Output_4.xlsx"
+OUTPUT_CSV = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/DGS_Combined_Output_4.csv"
+
+#join field
+join_field = 'CORE'
+
+# # Define tabs to read - adjust these based on your Excel files
+# TABS_1 = None  # None means read all sheets
+# TABS_2 = None  # None means read all sheets
+
+
+def main():
+    # # Read data with detailed logging
+    # print("\n=== Reading First File ===")
+    # df1 = read_excel_tabs(FILE_1, TABS_1)
+    
+    # print("\n=== Reading Second File ===")
+    # df2 = read_excel_tabs(FILE_2, TABS_2)
+
+    df1=pd.read_csv(FILE_1)
+    df2=pd.read_csv(FILE_2)
+    
+    # Check if dataframes are empty
+    if df1.empty:
+        print("Warning: First dataframe is empty!")
+    if df2.empty:
+        print("Warning: Second dataframe is empty!")
+    
+    # Print column names for debugging
+    print("\n=== Column Comparison ===")
+    print(f"df1 columns: {sorted(df1.columns.tolist())}")
+    print(f"df2 columns: {sorted(df2.columns.tolist())}")
+
+    # print('Before index update')
+    # print(df1.head())
+
+    # Set index for common field
+    df1.set_index(join_field, inplace=True)
+    df2.set_index(join_field, inplace=True)
+
+
+        # print('Before merge')
+    # print(df1.head())
+    
+    print(df1.head())
+    print('\n\n')
+    print(df2.head())
+
+    # Get columns from df2 that don't exist in df1 (excluding CORE which is the join key)
+    cols_to_add = [col for col in df2.columns if col not in df1.columns and col != join_field]
+    cols_to_add = [col for col in cols_to_add if "Unnamed" not in col]
+    print(cols_to_add)
+    
+    # if cols_to_add:
+    #     print(f"\nAdding columns: {cols_to_add}")
+    #     # Merge df1 with only the new columns from df2
+    #     df1 = df1.merge(df2[[join_field] + cols_to_add], on=join_field, how='left')
+    # else:
+    #     print("\nNo new columns to add from df2")
+    
+    # # Print any existing columns that were skipped
+    # skipped = [col for col in df2.columns if col in df1.columns and col != join_field]
+    # if skipped:
+    #     print(f"Skipped existing columns: {skipped}")
+
+    # Make cols positive
+    # posCols = [ 'DEPTH (M) (NGVD)', 'NGVD LOWER', 'NGVD UPPER']
+    df1 = df1.join(
+    df2[cols_to_add],
+    how="left")
+
+
+    print(df1[cols_to_add].notna().sum())
+    #     except:
+    #         print(f"{col} does not exist")
+
+    # print(df1.tail())
+
+    df1.to_csv(OUTPUT_CSV)
+
+main()

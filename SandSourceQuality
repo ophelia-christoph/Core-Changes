@@ -1,0 +1,132 @@
+import pandas as pd
+import numpy as np
+import re
+
+# =========================
+# USER SETTINGS
+# =========================
+INPUT_CSV = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/Final/DGS_Combined_Output_7.csv"
+OUTPUT_CSV = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/Final/DGS_SourceQuality.csv"
+
+
+REQUIRED_COLS = ["PRIMARY", "TEXTURE", "SECONDARY", "SOURCEQUALITY"]
+
+# =========================
+# NORMALIZATION HELPERS
+# =========================
+def norm(x):
+    if pd.isna(x):
+        return ""
+    return str(x).strip().lower()
+
+def has(text, patterns):
+    return any(re.search(p, text) for p in patterns)
+
+def parse_texture(texture):
+    t = norm(texture)
+    tokens = re.findall(r"\b(vf|f|m|c|vc)\b", t)
+    return tokens[0] if tokens else ""
+
+# =========================
+# KEYWORD GROUPS
+# =========================
+SAND = [r"\bsand\b"]
+CLAY = [r"\bclay\b", r"\bclayey\b"]
+SILT = [r"\bsilt\b", r"\bsilty\b"]
+GRAVEL = [r"\bgravel\b", r"\bpebble", r"\bcobble", r"\bboulder"]
+PEAT = [r"\bpeat"]
+GLAUCONITE = [r"\bglauconite", r"\bglauconitic", r"\bgreensand"]
+SHELL = [r"\bshell"]
+MICACEOUS = [r"\bmica", r"\bmicaceous"]
+ORGANIC = [r"\bmud", r"\bmuddy", r"\borganic"]
+ROCK = [r"\bsandstone", r"\bsiltstone", r"\bweak rock"]
+
+# =========================
+# SOURCE QUALITY LOGIC
+# =========================
+def assign_source_quality(primary, texture, secondary):
+    p = norm(primary)
+    s = norm(secondary)
+    tex = parse_texture(texture)
+
+    # --- Unacceptable triggers ---
+    if has(p, PEAT) or has(s, PEAT):
+        return "Unacceptable"
+
+    if has(p, GLAUCONITE) or has(s, GLAUCONITE):
+        return "Unacceptable"
+
+    if has(p, CLAY) or has(p, SILT):
+        if "silty sand" in p:
+            return "Medium"
+        if "sandy silt" in p:
+            return "Low"
+        return "Unacceptable"
+
+    # --- Gravel primary always LOW ---
+    if has(p, GRAVEL):
+        return "Low"
+
+    # --- Sand logic ---
+    if has(p, SAND):
+        # Base quality by texture
+        if tex in ["vf", "f", ""]:
+            base = "Medium"
+        elif tex in ["m", "c"]:
+            base = "High"
+        elif tex == "vc":
+            base = "Medium"
+        else:
+            base = "Medium"
+
+        # Secondary downgrades
+        if s != "":
+            if has(s, CLAY) or has(s, SILT):
+                return "Low"
+            if has(s, GRAVEL):
+                return "Low"
+
+        return base
+
+    # --- Shells ---
+    if has(p, SHELL) or has(s, SHELL):
+        return "Low"
+
+    # --- Organics / mud ---
+    if has(p, ORGANIC) or has(s, ORGANIC):
+        return "Unacceptable"
+
+    # --- Rock-like ---
+    if has(p, ROCK) or has(s, ROCK):
+        return "Unacceptable"
+
+    # Conservative fallback
+    return "Low"
+
+# =========================
+# MAIN
+# =========================
+def main():
+    df = pd.read_csv(INPUT_CSV)
+    df.columns = df.columns.str.strip().str.upper()
+
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    # OVERWRITE existing SOURCEQUALITY column
+    df["SOURCEQUALITY"] = df.apply(
+        lambda r: assign_source_quality(
+            r["PRIMARY"],
+            r["TEXTURE"],
+            r["SECONDARY"]
+        ),
+        axis=1
+    )
+
+    df.to_csv(OUTPUT_CSV, index=False)
+    print("SOURCEQUALITY updated successfully")
+    print(df["SOURCEQUALITY"].value_counts())
+
+if __name__ == "__main__":
+    main()

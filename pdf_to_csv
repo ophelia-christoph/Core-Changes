@@ -1,0 +1,278 @@
+import re
+import pdfplumber
+import pandas as pd
+import numpy as np
+
+PDF_PATH = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/NJ/COREM0029.pdf"
+OUTPUT_CSV = "/Users/ophelia.christoph/Downloads/Thesis/Cores/Coding/NJ/COREM0029.csv"
+
+# --------------------------
+# Helpers
+# --------------------------
+
+def normalize_labels(text: str) -> str:
+    if not text:
+        return text
+
+    repl = {
+        # core fields
+        r"M\s*A\s*J\s*O\s*R\s+L\s*I\s*T\s*H\s*O\s*L\s*O\s*G\s*Y\s*:": "MAJOR LITHOLOGY:",
+        r"G\s*R\s*A\s*I\s*N\s*S\s*I\s*Z\s*E\s*:": "Grainsize:",
+        r"C\s*O\s*L\s*O\s*R\s*:": "Color:",
+        r"S\s*O\s*R\s*T\s*I\s*N\s*G\s*:": "Sorting:",
+        r"N\s*A\s*T\s*U\s*R\s*E\s+O\s*F\s+B\s*O\s*T\s*T\s*O\s*M\s+C\s*O\s*N\s*T\s*A\s*C\s*T\s*:": "Nature of bottom contact:",
+        r"A\s*D\s*D\s*I\s*T\s*I\s*O\s*N\s*A\s*L\s+D\s*E\s*S\s*C\s*R\s*I\s*P\s*T\s*I\s*O\s*N\s*:": "Additional description:",
+    }
+
+    for pat, rep in repl.items():
+        text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+
+    # clean spacing after normalization
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+import re
+
+# Optional small dictionary of common geological terms
+COMMON_WORDS = [
+    "not", "given", "poorly", "sorted", "well", "moderately",
+    "coarse", "fine", "very", "sand", "silt", "clay",
+    "continuous", "inclined"
+]
+
+def smart_split(word):
+    """
+    Try to split a merged word into known geological terms.
+    Example: poorlysorted -> poorly sorted
+    """
+    for w1 in COMMON_WORDS:
+        if word.startswith(w1):
+            remainder = word[len(w1):]
+            if remainder in COMMON_WORDS:
+                return f"{w1} {remainder}"
+    return word
+
+
+def fix_spaced_words(text: str) -> str:
+    """
+    Fix spaced-out words like:
+    'p o o r ly s o r te d'
+    'n o t g iv e n'
+    'S O R T IN G'
+    """
+    if not text:
+        return text
+
+    # Find sequences of spaced letters
+    pattern = r"\b(?:[A-Za-z]\s+){2,}[A-Za-z]+\b"
+
+    def rebuild(match):
+        merged = match.group(0).replace(" ", "")
+        merged_lower = merged.lower()
+
+        # Try smart split
+        split_word = smart_split(merged_lower)
+
+        return split_word
+
+    text = re.sub(pattern, rebuild, text)
+
+    # Clean extra whitespace
+    text = re.sub(r"\s{2,}", " ", text)
+
+    return text.strip()
+    
+def remove_sample_codes(text: str) -> str:
+    return re.sub(r"\b(PP|PMAG|IWRH|HS|TOC|PAL|VP|IW)\b", "", text)
+
+
+def words_in_bbox(page, bbox):
+    cropped = page.crop(bbox)
+    try:
+        return cropped.extract_words(extra_attrs=["upright"])
+    except:
+        return cropped.extract_words()
+
+def join_words(words):
+    words = sorted(words, key=lambda w: (w["top"], w["x0"]))
+    return " ".join(w["text"] for w in words)
+
+def parse_field(block_text, field_name, stop_tokens):
+    pattern = rf"{re.escape(field_name)}:\s*(.+?)\s*(?=(" + "|".join(map(re.escape, stop_tokens)) + r")|$)"
+    m = re.search(pattern, block_text, flags=re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
+
+def clean_block_text(s):
+    s = re.sub(r"Proc\.\s*IODP.*?$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"IMAGES/.*?\.PDF", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"draobpihS\s+elpmas", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+# --------------------------
+# MAIN LOOP
+# --------------------------
+all_records = []
+
+with pdfplumber.open(PDF_PATH) as pdf:
+
+    for page_number, page in enumerate(pdf.pages):
+
+        full_text = page.extract_text() or ""
+
+        core_match = re.search(r"Site\s+(M\d+)\s+Hole\s+([A-Z])\s+Core\s+(\d+[A-Z])", full_text)
+        depth_match = re.search(r"Cored\s+([\d\.]+)-([\d\.]+)\s+mbsf", full_text)
+
+        if not (core_match and depth_match):
+            continue  # Skip non-core pages safely
+
+        core_name = f"{core_match.group(1)}-{core_match.group(2)}-{core_match.group(3)}"
+        core_top = float(depth_match.group(1))
+        core_bottom = float(depth_match.group(2))
+
+        W, H = page.width, page.height
+
+        RULER_BBOX = (0, 0, W * 0.22, H)
+        DESC_BBOX  = (W * 0.45, 0, W, H)
+
+        # --------------------------
+        # RULER CALIBRATION
+        # --------------------------
+        ruler_words = words_in_bbox(page, RULER_BBOX)
+        ruler_words = [w for w in ruler_words if w.get("upright", 1) == 1]
+
+        tick_points = []
+        for w in ruler_words:
+            txt = w["text"].strip()
+            if re.fullmatch(r"\d+(\.\d+)?", txt):
+                val = float(txt)
+                if (core_top - 0.5) <= val <= (core_bottom + 0.5):
+                    tick_points.append((w["top"], val))
+
+        if len(tick_points) < 2:
+            continue  # skip if cannot calibrate depth
+
+        ys = np.array([p[0] for p in tick_points], dtype=float)
+        ds = np.array([p[1] for p in tick_points], dtype=float)
+        a, b = np.polyfit(ys, ds, 1)
+
+        def y_to_depth(y):
+            return a * y + b
+
+        # --------------------------
+        # LITHOLOGY EXTRACTION
+        # --------------------------
+        desc_words = words_in_bbox(page, DESC_BBOX)
+        desc_words = [w for w in desc_words if w.get("upright", 1) == 1]
+
+        anchors = []
+        for i, w in enumerate(desc_words):
+            if "MAJOR" in w["text"].upper():
+                anchors.append({"i": i, "top": w["top"]})
+
+        anchors = sorted(anchors, key=lambda x: x["top"])
+        if len(anchors) == 0:
+            continue
+
+        VERTICAL_CUTOFF = anchors[-1]["top"] + 120
+
+        IGNORE_HEADERS = {"BIOTURBATION", "STRUCTURE", "FOSSILS", "ACCESSORIES", "DISTURBANCE"}
+        IGNORE_SAMPLE_CODES = {"PP", "PMAG", "IWRH", "HS", "TOC", "PAL"}
+
+        for idx, anc in enumerate(anchors):
+
+            start = anc["i"]
+            end = anchors[idx + 1]["i"] if idx < len(anchors) - 1 else len(desc_words)
+
+            block_words = [
+            w for w in desc_words[start:end]
+            if w["top"] <= VERTICAL_CUTOFF
+            ]
+
+            # 🔹 FIRST build the text from words
+            block_text = clean_block_text(join_words(block_words))
+            
+            # 🔹 THEN normalize labels
+            block_text = normalize_labels(block_text)
+            
+            # 🔹 THEN fix spaced words
+            block_text = fix_spaced_words(block_text)
+            
+            # 🔹 THEN remove sample codes
+            block_text = remove_sample_codes(block_text)
+            
+            block_text = re.sub(r"\s{2,}", " ", block_text).strip()
+
+
+
+
+            for hdr in IGNORE_HEADERS:
+                if hdr in block_text.upper():
+                    block_text = block_text.upper().split(hdr)[0].strip()
+                    break
+
+            for code in IGNORE_SAMPLE_CODES:
+                block_text = re.sub(rf"\b{code}\b", "", block_text)
+
+            block_text = re.sub(r"\s+", " ", block_text).strip()
+
+            FIELD_LABELS = [
+                "MAJOR LITHOLOGY",
+                "Grainsize",
+                "Color",
+                "Sorting",
+                "Nature of bottom contact"
+            ]
+            
+            def parse_exact_field(block_text, field_name):
+                pattern = (
+                    rf"{re.escape(field_name)}:\s*(.*?)"
+                    rf"(?=\s*(?:{'|'.join(map(re.escape, FIELD_LABELS))}):|$)"
+                )
+                m = re.search(pattern, block_text, flags=re.IGNORECASE | re.DOTALL)
+                return m.group(1).strip() if m else None
+            
+            major = parse_exact_field(block_text, "MAJOR LITHOLOGY")
+            grainsize = parse_exact_field(block_text, "Grainsize")
+            color = parse_exact_field(block_text, "Color")
+            sorting = parse_exact_field(block_text, "Sorting")
+            contact = parse_exact_field(block_text, "Nature of bottom contact")
+            additional = parse_exact_field(block_text, "Additional description")
+
+
+            
+            d_top = y_to_depth(anc["top"])
+            if idx < len(anchors) - 1:
+                d_bot = y_to_depth(anchors[idx + 1]["top"])
+            else:
+                d_bot = core_bottom
+
+            d_top = max(core_top, min(core_bottom, d_top))
+            d_bot = max(core_top, min(core_bottom, d_bot))
+
+            if not any([major, grainsize, color, sorting, contact]):
+                continue
+
+            all_records.append({
+                "Core Name": core_name,
+                "Depth_top_mbsf": round(d_top, 3),
+                "Depth_bottom_mbsf": round(d_bot, 3),
+                "MAJOR LITHOLOGY": major,
+                "Grainsize": grainsize,
+                "Color": color,
+                "Sorting": sorting,
+                "Nature of bottom contact": contact,
+                "Additional description": additional
+            })
+
+
+# --------------------------
+# Export
+# --------------------------
+df = pd.DataFrame(all_records)
+df = df[df["Depth_bottom_mbsf"] >= df["Depth_top_mbsf"]]
+
+df.to_csv(OUTPUT_CSV, index=False)
+
+print(f"Export complete: {OUTPUT_CSV}")
+print(f"Total rows exported: {len(df)}")
